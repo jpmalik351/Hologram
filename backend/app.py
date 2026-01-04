@@ -39,6 +39,10 @@ CORS(app)  # Enable CORS for React frontend
 # This is NOT persisted - each session starts fresh
 conversation_history = []
 
+# Current character being spoken to (set dynamically based on user request)
+# Format: {"name": "Character Name", "set_by_user": True/False}
+current_character = None
+
 # Context configuration
 # For character chatbots, 6-10 messages (3-5 exchanges) is usually enough
 # System prompt maintains character consistency, recent context just helps conversation flow
@@ -49,20 +53,95 @@ MAX_CONTEXT_MESSAGES = 10  # Last 10 messages (5 exchanges) - optimal for charac
 # CHARACTER CONFIGURATION
 # ============================================================================
 
-# Character system prompt - defines how the character responds
-# This is sent with every request to maintain character consistency
-CHARACTER_SYSTEM_PROMPT = """You are Batman, the Dark Knight of Gotham City. You are speaking to someone who needs your help or wants to talk.
+def detect_character_request(message: str) -> str | None:
+    """
+    Detect if user wants to speak to a specific character.
+    
+    Looks for patterns like:
+    - "I'd like to speak to [character]"
+    - "I want to talk to [character]"
+    - "Can I speak with [character]?"
+    - "Let me talk to [character]"
+    
+    Returns:
+        str: Character name if detected, None otherwise
+    """
+    import re
+    
+    message_lower = message.lower().strip()
+    
+    # Patterns to detect character requests
+    patterns = [
+        r"i'?d?\s+like\s+to\s+speak\s+to\s+(.+)",
+        r"i'?d?\s+like\s+to\s+talk\s+to\s+(.+)",
+        r"i\s+want\s+to\s+speak\s+to\s+(.+)",
+        r"i\s+want\s+to\s+talk\s+to\s+(.+)",
+        r"can\s+i\s+speak\s+with\s+(.+)",
+        r"can\s+i\s+talk\s+to\s+(.+)",
+        r"let\s+me\s+talk\s+to\s+(.+)",
+        r"let\s+me\s+speak\s+to\s+(.+)",
+        r"speak\s+to\s+(.+)",
+        r"talk\s+to\s+(.+)",
+    ]
+    
+    for pattern in patterns:
+        match = re.search(pattern, message_lower)
+        if match:
+            character = match.group(1).strip()
+            # Remove trailing punctuation/question marks
+            character = re.sub(r'[?.!]+$', '', character).strip()
+            if character and len(character) > 0:
+                return character
+    
+    return None
 
-Respond as Batman would:
-- You are serious, focused, and mission-driven
-- You speak with authority and determination
-- You're protective and want to help people
-- You might reference Gotham, justice, or your mission
-- You're direct but not unkind
+
+def build_character_system_prompt(character_name: str, knowledge: str = None) -> str:
+    """
+    Build a dynamic system prompt for a character based on RAG knowledge.
+    
+    Args:
+        character_name: Name of the character
+        knowledge: Optional knowledge retrieved from vector DB
+    
+    Returns:
+        str: System prompt for the character
+    """
+    if knowledge:
+        # If we have knowledge about the character, use it to build the prompt
+        prompt = f"""You are {character_name}. You are speaking to someone who wants to talk with you.
+
+Based on the knowledge provided about you, respond as {character_name} would:
+- Stay true to your character as described in the knowledge
+- Use the information provided to inform your responses
+- Be consistent with your personality and background
 - Keep responses concise and in character
 - Don't break character or mention that you're an AI
 
-Remember: You ARE Batman. Stay in character throughout the conversation."""
+IMPORTANT - STRICT KNOWLEDGE REQUIREMENTS:
+You have been provided with the following knowledge about yourself:
+
+{knowledge}
+
+CRITICAL RULES:
+1. You MUST ONLY use information from the knowledge provided above
+2. If the knowledge doesn't contain information to answer the question, say "I can't seem to remember that right now"
+3. DO NOT make up facts, details, or information not in the provided knowledge
+4. DO NOT use general knowledge - only use what's explicitly in the knowledge above
+5. Stay in character as {character_name}, but be strictly truthful to the provided knowledge
+6. If asked about something not in the knowledge, acknowledge you don't have that information
+
+Remember: You ARE {character_name}. Stay in character throughout the conversation, but only use information from your knowledge base."""
+    else:
+        # If no knowledge found, create a basic prompt that requires knowledge
+        prompt = f"""You are {character_name}. You are speaking to someone who wants to talk with you.
+
+However, you don't have any knowledge about yourself in your knowledge base yet. 
+Please let the user know that information about you needs to be uploaded first.
+
+Say something like: "I'd be happy to speak with you, but I don't have any information about myself in my knowledge base yet. Please upload documents about me first so I can answer your questions accurately.""""
+    
+    return prompt
 
 # ============================================================================
 # RAG CONFIGURATION
@@ -101,7 +180,7 @@ def chat():
             "response": "character's response text"
         }
     """
-    global conversation_history
+    global conversation_history, current_character
 
     data = request.json
     user_message = data.get("message", "")
@@ -109,39 +188,64 @@ def chat():
         return jsonify({'error': 'Message is required'}), 400
     
     try:
+        # Check if user wants to speak to a specific character
+        detected_character = detect_character_request(user_message)
+        
+        if detected_character:
+            # User requested a character - set it as current character
+            current_character = {"name": detected_character, "set_by_user": True}
+            # Retrieve knowledge about this character from vector DB
+            knowledge = ""
+            if USE_RAG:
+                try:
+                    from rag_service import retrieve_character_knowledge
+                    # Search for knowledge about this specific character
+                    # Include character name in query to find character-specific knowledge
+                    character_query = f"{detected_character} {user_message}"
+                    knowledge = retrieve_character_knowledge(character_query, top_k=5)
+                except ImportError:
+                    pass
+            
+            # Build system prompt for this character
+            system_content = build_character_system_prompt(detected_character, knowledge)
+            
+            # Confirm character selection to user
+            if knowledge:
+                reply = f"Hello! I'm {detected_character}. I'm ready to speak with you based on the information in my knowledge base. How can I help you?"
+            else:
+                reply = f"Hello! I'm {detected_character}. However, I don't have any information about myself in my knowledge base yet. Please upload documents about me first so I can answer your questions accurately."
+            
+            # Update conversation history
+            conversation_history.append({"role": "user", "content": user_message})
+            conversation_history.append({"role": "assistant", "content": reply})
+            
+            return jsonify({'response': reply})
+        
+        # If no character is set yet, prompt user to select one
+        if current_character is None:
+            return jsonify({
+                'response': "Hello! To start chatting, please tell me which character you'd like to speak with. For example, say 'I'd like to speak to [character name]'. Make sure you've uploaded documents about that character first!"
+            })
+        
+        # Character is set - continue conversation
+        character_name = current_character["name"]
+        
         # Build messages array for OpenAI API
         messages = []
         
-        # Build system prompt with optional RAG context
-        system_content = CHARACTER_SYSTEM_PROMPT
-        
-        # Add RAG knowledge if enabled (STRICT MODE - only use provided context)
+        # Retrieve RAG knowledge about the current character
+        knowledge = ""
         if USE_RAG:
             try:
                 from rag_service import retrieve_character_knowledge
-                # Retrieve top 3 most relevant knowledge chunks from Pinecone
-                knowledge = retrieve_character_knowledge(user_message, top_k=3)
-                if knowledge:
-                    # STRICT RAG: Only answer based on provided knowledge
-                    # This ensures the character only uses information from uploaded documents
-                    system_content += f"""
-
-IMPORTANT - STRICT KNOWLEDGE REQUIREMENTS:
-You have been provided with the following knowledge from historical sources:
-
-{knowledge}
-
-CRITICAL RULES:
-1. You MUST ONLY use information from the knowledge provided above
-2. If the knowledge doesn't contain information to answer the question, say "I don't have that information in my knowledge base"
-3. DO NOT make up facts, details, or information not in the provided knowledge
-4. DO NOT use general knowledge - only use what's explicitly in the knowledge above
-5. Stay in character, but be truthful to the sources provided
-6. If asked about something not in the knowledge, acknowledge you don't have that information
-
-Stay in character, but be strictly truthful to the provided knowledge."""
+                # Include character name in query to find character-specific knowledge
+                character_query = f"{character_name} {user_message}"
+                knowledge = retrieve_character_knowledge(character_query, top_k=5)
             except ImportError:
-                pass  # RAG not available, continue without it
+                pass
+        
+        # Build system prompt with character and RAG knowledge
+        system_content = build_character_system_prompt(character_name, knowledge)
         
         # ALWAYS add system message first (OpenAI needs it for every request to maintain character)
         messages.append({
@@ -181,18 +285,19 @@ Stay in character, but be strictly truthful to the provided knowledge."""
 @app.route('/reset', methods=['POST'])
 def reset():
     """
-    Reset conversation history and start a new conversation session.
+    Reset conversation history and current character, starting a new conversation session.
     
-    This clears the in-memory conversation history. Note: This does NOT affect
-    the Pinecone knowledge base (uploaded documents remain available).
+    This clears the in-memory conversation history and character selection. 
+    Note: This does NOT affect the Pinecone knowledge base (uploaded documents remain available).
     
     Response:
         {
             "message": "Conversation reset"
         }
     """
-    global conversation_history
+    global conversation_history, current_character
     conversation_history = []
+    current_character = None
     return jsonify({'message': 'Conversation reset'})
 
 
