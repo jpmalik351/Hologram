@@ -1,6 +1,6 @@
 services:
   - type: web
-    name: hologram-app
+    name: hologram-chatbot
     env: python
     # Build: First build frontend (requires Node.js), then install Python deps
     # Render's Python environment includes Node.js, so this should work
