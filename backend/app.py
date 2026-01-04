@@ -139,7 +139,7 @@ Remember: You ARE {character_name}. Stay in character throughout the conversatio
 However, you don't have any knowledge about yourself in your knowledge base yet. 
 Please let the user know that information about you needs to be uploaded first.
 
-Say something like: "I'd be happy to speak with you, but I don't have any information about myself in my knowledge base yet. Please upload documents about me first so I can answer your questions accurately.""""
+Say something like: I'd be happy to speak with you, but I don't have any information about myself in my knowledge base yet. Please upload documents about me first so I can answer your questions accurately."""
     
     return prompt
 
