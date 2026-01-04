@@ -1,8 +1,9 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import './ChatWindow.css'
 
 function ChatWindow({ messages, isLoading }) {
   const messagesEndRef = useRef(null)
+  const [playingIndex, setPlayingIndex] = useState(null)
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -11,6 +12,40 @@ function ChatWindow({ messages, isLoading }) {
   useEffect(() => {
     scrollToBottom()
   }, [messages, isLoading])
+
+  const playTTS = async (text, index) => {
+    if (playingIndex === index) return // Already playing
+    
+    setPlayingIndex(index)
+    try {
+      const response = await fetch('/api/tts', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ text, voice: 'onyx' }),
+      })
+
+      if (response.ok) {
+        const audioBlob = await response.blob()
+        const audioUrl = URL.createObjectURL(audioBlob)
+        const audio = new Audio(audioUrl)
+        await audio.play()
+        audio.onended = () => {
+          URL.revokeObjectURL(audioUrl)
+          setPlayingIndex(null)
+        }
+        audio.onerror = () => {
+          setPlayingIndex(null)
+        }
+      } else {
+        setPlayingIndex(null)
+      }
+    } catch (error) {
+      console.error('TTS playback error:', error)
+      setPlayingIndex(null)
+    }
+  }
 
   return (
     <div className="chat-window">
@@ -28,6 +63,25 @@ function ChatWindow({ messages, isLoading }) {
             <div className="message-content">
               {message.text}
             </div>
+            {message.sender === 'assistant' && (
+              <button
+                className="tts-button"
+                onClick={() => playTTS(message.text, index)}
+                disabled={playingIndex === index}
+                aria-label="Play audio"
+              >
+                {playingIndex === index ? (
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                    <rect x="6" y="4" width="4" height="16" />
+                    <rect x="14" y="4" width="4" height="16" />
+                  </svg>
+                ) : (
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M8 5v14l11-7z" />
+                  </svg>
+                )}
+              </button>
+            )}
           </div>
         ))}
         {isLoading && (

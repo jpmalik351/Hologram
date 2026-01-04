@@ -41,3 +41,10 @@ aws bedrock put-model-invocation-logging-configuration \
 - Some models may require approval or have usage limits
 - Changes can take a few minutes to propagate
 
+
+
+
+
+
+
+

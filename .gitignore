@@ -42,3 +42,6 @@ ENV/
 .DS_Store
 Thumbs.db
 
+# Documentation files
+*.md
+

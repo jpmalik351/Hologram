@@ -1,0 +1,26 @@
+services:
+  - type: web
+    name: hologram-app
+    env: python
+    # Build: First build frontend (requires Node.js), then install Python deps
+    # Render's Python environment includes Node.js, so this should work
+    buildCommand: |
+      chmod +x build.sh && ./build.sh
+    # Start: Use gunicorn to serve Flask app (which serves frontend static files)
+    startCommand: cd backend && gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120
+    envVars:
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: OPENAI_MODEL
+        value: gpt-4o-mini
+      - key: PINECONE_API_KEY
+        sync: false
+      - key: PINECONE_INDEX_NAME
+        value: hologram-conversations
+      - key: PINECONE_REGION
+        value: us-east-1
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: FLASK_ENV
+        value: production
+

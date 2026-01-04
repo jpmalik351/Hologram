@@ -1,6 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import ChatWindow from './components/ChatWindow'
 import VoiceButton from './components/VoiceButton'
+import FileUpload from './components/FileUpload'
 import './App.css'
 
 function App() {
@@ -9,6 +10,28 @@ function App() {
 
   const addMessage = (text, sender) => {
     setMessages(prev => [...prev, { text, sender, timestamp: Date.now() }])
+  }
+
+  const playTTS = async (text) => {
+    try {
+      const response = await fetch('/api/tts', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ text, voice: 'onyx' }),
+      })
+
+      if (response.ok) {
+        const audioBlob = await response.blob()
+        const audioUrl = URL.createObjectURL(audioBlob)
+        const audio = new Audio(audioUrl)
+        await audio.play()
+        audio.onended = () => URL.revokeObjectURL(audioUrl)
+      }
+    } catch (error) {
+      console.error('TTS playback error:', error)
+    }
   }
 
   const sendMessage = async (messageText) => {
@@ -30,6 +53,8 @@ function App() {
       
       if (response.ok) {
         addMessage(data.response, 'assistant')
+        // Automatically play TTS for assistant response
+        await playTTS(data.response)
       } else {
         addMessage(`Error: ${data.error || 'Failed to get response'}`, 'assistant')
       }
@@ -73,6 +98,9 @@ function App() {
       <div className="app-container">
         <h1 className="app-title">Hologram Chat</h1>
         <ChatWindow messages={messages} isLoading={isLoading} />
+        <FileUpload onUploadSuccess={(data) => {
+          addMessage(`Document "${data.message.split(' ')[2]}" uploaded successfully!`, 'system')
+        }} />
         <VoiceButton onTranscription={handleTranscription} disabled={isLoading} />
       </div>
     </div>
