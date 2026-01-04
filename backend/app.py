@@ -415,18 +415,56 @@ def serve_frontend(path):
     """
     Serve React app for all non-API routes.
     This must be defined AFTER all API routes to avoid conflicts.
+    
+    Handles:
+    - Static assets (JS, CSS, images) - serves files directly
+    - React Router routes - serves index.html for all other paths
+    - Page reloads - ensures index.html is served so React Router can handle routing
     """
     # Don't serve frontend for API routes (they're handled above)
     if path.startswith('api/'):
         return jsonify({'error': 'Not found'}), 404
     
     # Check if static folder exists (for production)
-    if app.static_folder and os.path.exists(app.static_folder):
-        # If path exists as a file, serve it
-        if path and os.path.exists(os.path.join(app.static_folder, path)):
-            return send_from_directory(app.static_folder, path)
-        # Otherwise serve index.html (for React Router)
-        return send_from_directory(app.static_folder, 'index.html')
+    # Try multiple path resolutions to handle different deployment scenarios
+    static_path = None
+    if app.static_folder:
+        # Try 1: Relative to app.py location (most common)
+        backend_dir = os.path.dirname(os.path.abspath(__file__))
+        candidate_path = os.path.abspath(os.path.join(backend_dir, app.static_folder))
+        if os.path.exists(candidate_path):
+            static_path = candidate_path
+        else:
+            # Try 2: Absolute path (if already absolute)
+            if os.path.isabs(app.static_folder) and os.path.exists(app.static_folder):
+                static_path = app.static_folder
+            else:
+                # Try 3: Relative to current working directory
+                candidate_path = os.path.abspath(app.static_folder)
+                if os.path.exists(candidate_path):
+                    static_path = candidate_path
+    
+    if static_path and os.path.exists(static_path):
+        
+        # Normalize the path (remove leading/trailing slashes, handle ..)
+        if path:
+            # Remove leading slash if present
+            path = path.lstrip('/')
+            file_path = os.path.join(static_path, path)
+            # Normalize the path to prevent directory traversal
+            file_path = os.path.normpath(file_path)
+            # Ensure it's still within static_path
+            if not file_path.startswith(static_path):
+                # Security: path outside static folder, serve index.html
+                return send_from_directory(static_path, 'index.html')
+            
+            # Check if it's a file and exists
+            if os.path.isfile(file_path):
+                return send_from_directory(static_path, path)
+        
+        # For root path or any non-file path, serve index.html (React Router will handle routing)
+        # This ensures page reloads work correctly - React Router handles client-side routing
+        return send_from_directory(static_path, 'index.html')
     else:
         # In development, if frontend isn't built, return a helpful message
         return jsonify({
