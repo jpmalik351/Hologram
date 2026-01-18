@@ -2,11 +2,61 @@ import { useState, useRef, useEffect } from 'react'
 import ChatWindow from './components/ChatWindow'
 import VoiceButton from './components/VoiceButton'
 import FileUpload from './components/FileUpload'
+import Login from './components/Login'
 import './App.css'
 
 function App() {
+  const [isAuthenticated, setIsAuthenticated] = useState(false)
+  const [isCheckingAuth, setIsCheckingAuth] = useState(true)
+  const [username, setUsername] = useState(null)
   const [messages, setMessages] = useState([])
   const [isLoading, setIsLoading] = useState(false)
+
+  // Check authentication status on mount
+  useEffect(() => {
+    checkAuth()
+  }, [])
+
+  const checkAuth = async () => {
+    try {
+      const response = await fetch('/api/auth/check', {
+        method: 'GET',
+        credentials: 'include', // Important for cookies
+      })
+      const data = await response.json()
+      
+      if (data.authenticated) {
+        setIsAuthenticated(true)
+        setUsername(data.username)
+      } else {
+        setIsAuthenticated(false)
+      }
+    } catch (error) {
+      console.error('Auth check error:', error)
+      setIsAuthenticated(false)
+    } finally {
+      setIsCheckingAuth(false)
+    }
+  }
+
+  const handleLogin = () => {
+    setIsAuthenticated(true)
+    checkAuth() // Refresh username
+  }
+
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/logout', {
+        method: 'POST',
+        credentials: 'include',
+      })
+      setIsAuthenticated(false)
+      setUsername(null)
+      setMessages([]) // Clear conversation on logout
+    } catch (error) {
+      console.error('Logout error:', error)
+    }
+  }
 
   const addMessage = (text, sender) => {
     setMessages(prev => [...prev, { text, sender, timestamp: Date.now() }])
@@ -19,6 +69,7 @@ function App() {
         headers: {
           'Content-Type': 'application/json',
         },
+        credentials: 'include',
         body: JSON.stringify({ text, voice: 'onyx' }),
       })
 
@@ -46,6 +97,7 @@ function App() {
         headers: {
           'Content-Type': 'application/json',
         },
+        credentials: 'include',
         body: JSON.stringify({ message: messageText }),
       })
 
@@ -75,6 +127,7 @@ function App() {
 
       const transcribeResponse = await fetch('/api/transcribe', {
         method: 'POST',
+        credentials: 'include',
         body: formData,
       })
 
@@ -93,10 +146,48 @@ function App() {
     }
   }
 
+  // Show loading state while checking authentication
+  if (isCheckingAuth) {
+    return (
+      <div className="app">
+        <div className="app-container">
+          <div style={{ textAlign: 'center', padding: '40px' }}>
+            <p>Loading...</p>
+          </div>
+        </div>
+      </div>
+    )
+  }
+
+  // Show login page if not authenticated
+  if (!isAuthenticated) {
+    return <Login onLogin={handleLogin} />
+  }
+
+  // Show main app if authenticated
   return (
     <div className="app">
       <div className="app-container">
-        <h1 className="app-title">Hologram Chat</h1>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+          <h1 className="app-title">Hologram Chat</h1>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+            {username && <span style={{ color: '#666', fontSize: '14px' }}>Logged in as {username}</span>}
+            <button 
+              onClick={handleLogout}
+              style={{
+                padding: '8px 16px',
+                background: '#f44336',
+                color: 'white',
+                border: 'none',
+                borderRadius: '6px',
+                cursor: 'pointer',
+                fontSize: '14px'
+              }}
+            >
+              Logout
+            </button>
+          </div>
+        </div>
         <ChatWindow messages={messages} isLoading={isLoading} />
         <FileUpload onUploadSuccess={(data) => {
           addMessage(`Document "${data.message.split(' ')[2]}" uploaded successfully!`, 'system')

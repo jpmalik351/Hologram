@@ -13,8 +13,11 @@ Architecture:
 - Strict RAG mode: answers only from retrieved knowledge
 """
 
-from flask import Flask, request, jsonify, send_file, send_from_directory
+from flask import Flask, request, jsonify, send_file, send_from_directory, session
 from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
+from functools import wraps
 from openai_service import call_llm, transcribe_audio, text_to_speech
 from document_processor import process_uploaded_file
 from pinecone_service import get_or_create_index, get_embedding
@@ -29,6 +32,29 @@ import uuid
 
 app = Flask(__name__, static_folder='../frontend/dist', static_url_path='')
 CORS(app)  # Enable CORS for React frontend
+
+# Session configuration for authentication
+app.secret_key = os.environ.get('FLASK_SECRET_KEY', os.urandom(32))  # Use env var or generate random key
+app.config['SESSION_COOKIE_SECURE'] = os.environ.get('FLASK_ENV') == 'production'  # Secure cookies in production
+app.config['SESSION_COOKIE_HTTPONLY'] = True  # Prevent XSS attacks
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'  # CSRF protection
+
+# ============================================================================
+# RATE LIMITING & COST PROTECTION
+# ============================================================================
+
+# Initialize rate limiter (uses IP address to identify users)
+limiter = Limiter(
+    app=app,
+    key_func=get_remote_address,
+    default_limits=["50 per day", "20 per hour"],  # Global limits per IP (stricter for cost protection)
+    storage_uri="memory://"  # In-memory storage (resets on restart)
+)
+
+# Request size limits (prevent large payloads that could be expensive)
+MAX_MESSAGE_LENGTH = 2000  # characters
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
+MAX_AUDIO_DURATION = 60  # seconds (Whisper costs $0.006/minute)
 
 # ============================================================================
 # CONVERSATION STATE (In-Memory, Per Session)
@@ -152,12 +178,137 @@ Say something like: I'd be happy to speak with you, but I don't have any informa
 USE_RAG = True  # Enabled for testing with Batman knowledge
 
 # ============================================================================
+# AUTHENTICATION
+# ============================================================================
+
+def load_credentials():
+    """
+    Load credentials from AUTH_CREDENTIALS environment variable.
+    
+    Format: "username1:password1,username2:password2,..."
+    
+    Returns:
+        dict: Dictionary mapping usernames to passwords
+    """
+    creds_str = os.environ.get('AUTH_CREDENTIALS', '')
+    if not creds_str:
+        return {}
+    
+    credentials = {}
+    for pair in creds_str.split(','):
+        pair = pair.strip()
+        if ':' in pair:
+            username, password = pair.split(':', 1)  # Split on first colon only
+            credentials[username.strip()] = password.strip()
+    
+    return credentials
+
+
+def require_auth(f):
+    """
+    Decorator to require authentication for protected endpoints.
+    
+    Checks if user is logged in via session. Returns 401 if not authenticated.
+    """
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not session.get('authenticated'):
+            return jsonify({'error': 'Authentication required'}), 401
+        return f(*args, **kwargs)
+    return decorated_function
+
+
+# ============================================================================
 # API ENDPOINTS
 # ============================================================================
+
+# Authentication endpoints (unprotected)
+@app.route('/api/login', methods=['POST'])
+def login():
+    """
+    Login endpoint - authenticates user with username/password.
+    
+    Request body:
+        {
+            "username": "username",
+            "password": "password"
+        }
+    
+    Response:
+        {
+            "success": true,
+            "message": "Logged in successfully"
+        }
+    """
+    data = request.json
+    username = data.get('username', '')
+    password = data.get('password', '')
+    
+    if not username or not password:
+        return jsonify({'error': 'Username and password required'}), 400
+    
+    credentials = load_credentials()
+    
+    # Check if credentials are configured
+    if not credentials:
+        return jsonify({'error': 'Authentication not configured'}), 500
+    
+    # Verify credentials
+    if username in credentials and credentials[username] == password:
+        session['authenticated'] = True
+        session['username'] = username
+        return jsonify({
+            'success': True,
+            'message': 'Logged in successfully'
+        })
+    else:
+        return jsonify({'error': 'Invalid username or password'}), 401
+
+
+@app.route('/api/logout', methods=['POST'])
+def logout():
+    """
+    Logout endpoint - clears user session.
+    
+    Response:
+        {
+            "success": true,
+            "message": "Logged out successfully"
+        }
+    """
+    session.clear()
+    return jsonify({
+        'success': True,
+        'message': 'Logged out successfully'
+    })
+
+
+@app.route('/api/auth/check', methods=['GET'])
+def auth_check():
+    """
+    Check if user is authenticated.
+    
+    Response:
+        {
+            "authenticated": true/false,
+            "username": "username" (if authenticated)
+        }
+    """
+    if session.get('authenticated'):
+        return jsonify({
+            'authenticated': True,
+            'username': session.get('username')
+        })
+    else:
+        return jsonify({
+            'authenticated': False
+        })
 
 # Support both /api/chat and /chat for compatibility
 @app.route('/api/chat', methods=['POST'])
 @app.route('/chat', methods=['POST'])
+@limiter.limit("15 per minute")  # 7 chat messages per minute per IP (stricter for cost protection)
+@require_auth
 def chat():
     """
     Main chat endpoint - handles user messages and returns character responses.
@@ -186,6 +337,16 @@ def chat():
     user_message = data.get("message", "")
     if not user_message:
         return jsonify({'error': 'Message is required'}), 400
+    
+    # Input validation - prevent abuse and limit costs
+    if len(user_message) > MAX_MESSAGE_LENGTH:
+        return jsonify({
+            'error': f'Message too long. Maximum {MAX_MESSAGE_LENGTH} characters allowed.'
+        }), 400
+    
+    # Basic sanity check - reject empty or whitespace-only messages
+    if not user_message.strip():
+        return jsonify({'error': 'Message cannot be empty'}), 400
     
     try:
         # Check if user wants to speak to a specific character
@@ -283,6 +444,7 @@ def chat():
 
 @app.route('/api/reset', methods=['POST'])
 @app.route('/reset', methods=['POST'])
+@require_auth
 def reset():
     """
     Reset conversation history and current character, starting a new conversation session.
@@ -303,6 +465,8 @@ def reset():
 
 @app.route('/api/transcribe', methods=['POST'])
 @app.route('/transcribe', methods=['POST'])
+@limiter.limit("15 per minute")  # 5 transcriptions per minute per IP (stricter for cost protection)
+@require_auth
 def transcribe():
     """
     Transcribe audio file to text using OpenAI Whisper.
@@ -325,6 +489,17 @@ def transcribe():
         return jsonify({'error': 'No audio file provided'}), 400
     
     audio_file = request.files['audio']
+    
+    # Check file size (Whisper costs $0.006/minute, limit to prevent abuse)
+    # Note: We can't easily check audio duration without processing, so limit file size
+    audio_file.seek(0, os.SEEK_END)
+    file_size = audio_file.tell()
+    audio_file.seek(0)  # Reset to beginning
+    
+    if file_size > MAX_FILE_SIZE:
+        return jsonify({
+            'error': f'Audio file too large. Maximum {MAX_FILE_SIZE // (1024*1024)} MB allowed.'
+        }), 400
     
     # Save to temporary file
     with tempfile.NamedTemporaryFile(delete=False, suffix='.webm') as tmp_file:
@@ -349,6 +524,8 @@ def transcribe():
 
 @app.route('/api/upload', methods=['POST'])
 @app.route('/upload', methods=['POST'])
+@limiter.limit("10 per hour")  # 2 uploads per hour per IP (MOST EXPENSIVE - each upload generates many embeddings)
+@require_auth
 def upload_document():
     """
     Upload PDF or TXT file and add to Pinecone vector database.
@@ -383,6 +560,16 @@ def upload_document():
     file = request.files['file']
     if file.filename == '':
         return jsonify({'error': 'No file selected'}), 400
+    
+    # Check file size (prevent expensive processing of huge files)
+    file.seek(0, os.SEEK_END)
+    file_size = file.tell()
+    file.seek(0)  # Reset to beginning
+    
+    if file_size > MAX_FILE_SIZE:
+        return jsonify({
+            'error': f'File too large. Maximum {MAX_FILE_SIZE // (1024*1024)} MB allowed.'
+        }), 400
     
     # Check file type
     filename = file.filename
@@ -469,6 +656,8 @@ def upload_document():
 
 @app.route('/api/tts', methods=['POST'])
 @app.route('/tts', methods=['POST'])
+@limiter.limit("15 per minute")  # 7 TTS requests per minute per IP (stricter for cost protection)
+@require_auth
 def tts():
     """
     Convert text to speech using OpenAI TTS.
@@ -493,6 +682,12 @@ def tts():
     
     if not text:
         return jsonify({'error': 'Text is required'}), 400
+    
+    # Input validation - TTS costs $15 per 1M characters, limit text length
+    if len(text) > MAX_MESSAGE_LENGTH:
+        return jsonify({
+            'error': f'Text too long for TTS. Maximum {MAX_MESSAGE_LENGTH} characters allowed.'
+        }), 400
     
     try:
         # Generate speech audio bytes
