@@ -97,3 +97,32 @@ def get_embedding(text: str) -> list:
         raise Exception(f"Embedding error: {str(e)}")
 
 
+
+def delete_chunks(chunk_ids: list):
+    """
+    Delete chunks from Pinecone index by their IDs.
+    
+    Args:
+        chunk_ids: List of chunk IDs to delete
+    
+    Raises:
+        Exception: If deletion fails
+    
+    Note:
+        - Used when deleting files or overwriting duplicates
+        - Removes vectors permanently from Pinecone
+        - Cannot be undone
+    """
+    try:
+        if not chunk_ids:
+            return
+        
+        index = get_or_create_index()
+        if index is None:
+            raise Exception("Pinecone index not available")
+        
+        # Delete vectors by ID
+        index.delete(ids=chunk_ids)
+        
+    except Exception as e:
+        raise Exception(f"Failed to delete chunks from Pinecone: {str(e)}")
