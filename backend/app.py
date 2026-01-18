@@ -47,7 +47,7 @@ app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'  # CSRF protection
 limiter = Limiter(
     app=app,
     key_func=get_remote_address,
-    default_limits=["50 per day", "20 per hour"],  # Global limits per IP (stricter for cost protection)
+    default_limits=["500 per day", "100 per hour"],  # Global limits per IP - generous for normal use
     storage_uri="memory://"  # In-memory storage (resets on restart)
 )
 
