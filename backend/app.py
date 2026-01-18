@@ -20,7 +20,9 @@ from flask_limiter.util import get_remote_address
 from functools import wraps
 from openai_service import call_llm, transcribe_audio, text_to_speech
 from document_processor import process_uploaded_file
-from pinecone_service import get_or_create_index, get_embedding
+from pinecone_service import get_or_create_index, get_embedding, delete_chunks
+from database import db, init_db, UploadedFile
+from file_utils import calculate_file_hash, get_next_version_filename, sanitize_filename
 import os
 import tempfile
 import io
@@ -38,6 +40,9 @@ app.secret_key = os.environ.get('FLASK_SECRET_KEY', os.urandom(32))  # Use env v
 app.config['SESSION_COOKIE_SECURE'] = os.environ.get('FLASK_ENV') == 'production'  # Secure cookies in production
 app.config['SESSION_COOKIE_HTTPONLY'] = True  # Prevent XSS attacks
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'  # CSRF protection
+
+# Initialize database
+init_db(app)
 
 # ============================================================================
 # RATE LIMITING & COST PROTECTION
@@ -528,30 +533,31 @@ def transcribe():
 @require_auth
 def upload_document():
     """
-    Upload PDF or TXT file and add to Pinecone vector database.
+    Upload PDF or TXT file - Step 1: Check for duplicates
     
     Flow:
     1. Receives file (PDF or TXT)
-    2. Extracts text from file
-    3. Chunks text into smaller pieces (1000 chars with 200 overlap)
-    4. For each chunk:
-       a. Generates embedding vector using OpenAI
-       b. Stores in Pinecone with metadata containing full text
-    5. Returns success message with chunk count
-    
-    Important:
-    - Documents are stored persistently in Pinecone
-    - Same Pinecone index is used every time (previous uploads remain accessible)
-    - Full text is stored in metadata (no need to keep original files)
+    2. Calculates file hash
+    3. Checks for duplicate in database
+    4. If duplicate found, returns duplicate info (requires user confirmation)
+    5. If no duplicate, processes and stores file
     
     Request:
         Form data with 'file' field (PDF or TXT)
     
-    Response:
+    Response (no duplicate):
         {
             "message": "Successfully uploaded filename.pdf",
             "chunks_stored": 10,
-            "total_chunks": 10
+            "file_id": 123
+        }
+    
+    Response (duplicate found):
+        {
+            "duplicate": true,
+            "existing_file": {...},
+            "file_hash": "...",
+            "file_size": 12345
         }
     """
     if 'file' not in request.files:
@@ -561,65 +567,192 @@ def upload_document():
     if file.filename == '':
         return jsonify({'error': 'No file selected'}), 400
     
-    # Check file size (prevent expensive processing of huge files)
-    file.seek(0, os.SEEK_END)
-    file_size = file.tell()
-    file.seek(0)  # Reset to beginning
+    # Sanitize filename
+    filename = sanitize_filename(file.filename)
     
+    # Read file data (we need it for hash calculation)
+    file_data = file.read()
+    file_size = len(file_data)
+    
+    # Check file size
     if file_size > MAX_FILE_SIZE:
         return jsonify({
             'error': f'File too large. Maximum {MAX_FILE_SIZE // (1024*1024)} MB allowed.'
         }), 400
     
     # Check file type
-    filename = file.filename
     file_ext = os.path.splitext(filename)[1].lower()
     if file_ext not in ['.pdf', '.txt', '.text']:
         return jsonify({'error': 'Unsupported file type. Please upload PDF or TXT files.'}), 400
     
     try:
+        # Calculate file hash for duplicate detection
+        file_hash = calculate_file_hash(file_data)
+        
+        # Check for duplicate in database
+        existing_file = UploadedFile.query.filter_by(file_hash=file_hash).first()
+        
+        if existing_file:
+            # Duplicate found - return info and ask user what to do
+            return jsonify({
+                'duplicate': True,
+                'existing_file': existing_file.to_dict(),
+                'file_hash': file_hash,
+                'file_size': file_size,
+                'filename': filename
+            })
+        
+        # No duplicate - process and store the file
+        return _process_and_store_file(file_data, filename, file_hash, file_size, file_ext)
+        
+    except Exception as e:
+        return jsonify({'error': f'Failed to process file: {str(e)}'}), 500
+
+
+@app.route('/api/upload/confirm', methods=['POST'])
+@app.route('/upload/confirm', methods=['POST'])
+@limiter.limit("10 per hour")
+@require_auth
+def upload_document_confirm():
+    """
+    Upload PDF or TXT file - Step 2: Handle duplicate resolution
+    
+    Called when user chooses how to handle a duplicate file.
+    
+    Request body:
+        {
+            "file_hash": "sha256hash",
+            "filename": "document.pdf",
+            "file_size": 12345,
+            "action": "overwrite" | "keep_both"
+        }
+    
+    Note: File data must be re-uploaded in form data.
+    
+    Response:
+        {
+            "message": "Successfully uploaded filename.pdf",
+            "chunks_stored": 10,
+            "file_id": 123
+        }
+    """
+    if 'file' not in request.files:
+        return jsonify({'error': 'No file provided'}), 400
+    
+    file = request.files['file']
+    action = request.form.get('action')  # 'overwrite' or 'keep_both'
+    
+    if action not in ['overwrite', 'keep_both']:
+        return jsonify({'error': 'Invalid action. Must be "overwrite" or "keep_both"'}), 400
+    
+    # Read file data
+    filename = sanitize_filename(file.filename)
+    file_data = file.read()
+    file_size = len(file_data)
+    file_ext = os.path.splitext(filename)[1].lower()
+    
+    try:
+        # Calculate file hash
+        file_hash = calculate_file_hash(file_data)
+        
+        # Find existing file
+        existing_file = UploadedFile.query.filter_by(file_hash=file_hash).first()
+        
+        if action == 'overwrite':
+            # Delete old chunks from Pinecone
+            if existing_file and existing_file.chunk_ids:
+                delete_chunks(existing_file.chunk_ids)
+            
+            # Delete old database record
+            if existing_file:
+                db.session.delete(existing_file)
+                db.session.commit()
+            
+            # Process and store new file with same name
+            return _process_and_store_file(file_data, filename, file_hash, file_size, file_ext)
+        
+        else:  # keep_both
+            # Get all files to find next version number
+            all_files = UploadedFile.query.all()
+            all_filenames = [f.filename for f in all_files]
+            
+            # Generate versioned filename
+            versioned_filename = get_next_version_filename(filename, all_filenames)
+            
+            # Process and store with versioned name
+            return _process_and_store_file(file_data, versioned_filename, file_hash, file_size, file_ext, original_filename=filename)
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': f'Failed to process file: {str(e)}'}), 500
+
+
+def _process_and_store_file(file_data: bytes, filename: str, file_hash: str, file_size: int, file_ext: str, original_filename: str = None):
+    """
+    Internal helper to process file and store in Pinecone + database.
+    
+    Args:
+        file_data: File contents as bytes
+        filename: Filename to use (may be versioned)
+        file_hash: SHA256 hash of file
+        file_size: Size in bytes
+        file_ext: File extension
+        original_filename: Original filename before versioning (optional)
+    
+    Returns:
+        JSON response with upload success
+    """
+    # Save to temporary file for processing
+    with tempfile.NamedTemporaryFile(delete=False, suffix=file_ext) as tmp_file:
+        tmp_file.write(file_data)
+        tmp_path = tmp_file.name
+    
+    try:
+        # Create a file-like object for process_uploaded_file
+        from io import BytesIO
+        file_obj = BytesIO(file_data)
+        
         # Process file into chunks
-        # Returns list of dicts: [{"content": "chunk text", "metadata": {...}}, ...]
-        chunks = process_uploaded_file(file, filename)
+        chunks = process_uploaded_file(file_obj, filename)
         
         if not chunks:
             return jsonify({'error': 'Failed to extract text from file'}), 400
         
-        # Get Pinecone index (creates if doesn't exist)
+        # Get Pinecone index
         index = get_or_create_index()
         if index is None:
             return jsonify({'error': 'Pinecone is not configured'}), 500
         
-        # Store each chunk in Pinecone
+        # Store each chunk in Pinecone and track chunk IDs
+        chunk_ids = []
         stored_count = 0
         errors = []
+        
         for chunk_data in chunks:
             try:
-                # Get embedding vector for this chunk
-                # This converts text to a 1536-dimensional vector
+                # Get embedding vector
                 embedding = get_embedding(chunk_data["content"])
                 
-                # Prepare metadata (include full text for retrieval)
-                # Pinecone returns metadata when querying, so we store full text here
+                # Prepare metadata
                 metadata = {
-                    "content": chunk_data["content"],  # Full chunk text - this is what gets retrieved
-                    "filename": chunk_data["metadata"]["filename"],
+                    "content": chunk_data["content"],
+                    "filename": filename,
                     "chunk_index": chunk_data["metadata"]["chunk_index"],
                     "total_chunks": chunk_data["metadata"]["total_chunks"],
                     "type": "document_chunk",
-                    "file_type": chunk_data["metadata"]["file_type"]
+                    "file_type": file_ext
                 }
                 
-                # Generate unique ID for this chunk
+                # Generate unique ID
                 chunk_id = f"doc_{uuid.uuid4()}_{chunk_data['metadata']['chunk_index']}"
+                chunk_ids.append(chunk_id)
                 
-                # Store in Pinecone (upsert = update or insert)
-                # This is persistent - same index every time
+                # Store in Pinecone
                 index.upsert(
                     vectors=[{
                         "id": chunk_id,
-                        "values": embedding,  # The 1536-dim vector
-                        "metadata": metadata  # The text + file info
+                        "values": embedding,
+                        "metadata": metadata
                     }]
                 )
                 
@@ -635,14 +768,25 @@ def upload_document():
             error_details = "; ".join(errors) if errors else "Unknown error"
             return jsonify({
                 'error': f'Failed to store any chunks. Errors: {error_details}',
-                'chunks_stored': 0,
-                'total_chunks': len(chunks)
             }), 500
+        
+        # Save file record to database
+        uploaded_file = UploadedFile(
+            filename=filename,
+            original_filename=original_filename or filename,
+            file_hash=file_hash,
+            file_size=file_size,
+            file_type=file_ext,
+            chunk_ids=chunk_ids,
+            chunk_count=stored_count
+        )
+        db.session.add(uploaded_file)
+        db.session.commit()
         
         response = {
             'message': f'Successfully uploaded {filename}',
             'chunks_stored': stored_count,
-            'total_chunks': len(chunks)
+            'file_id': uploaded_file.id
         }
         
         if errors:
@@ -650,8 +794,10 @@ def upload_document():
         
         return jsonify(response)
         
-    except Exception as e:
-        return jsonify({'error': f'Failed to process file: {str(e)}'}), 500
+    finally:
+        # Clean up temp file
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
 
 
 @app.route('/api/tts', methods=['POST'])
@@ -703,6 +849,129 @@ def tts():
         
     except Exception as e:
         return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/files', methods=['GET'])
+@app.route('/files', methods=['GET'])
+@require_auth
+def list_files():
+    """
+    List all uploaded files with optional search/filter.
+    
+    Query parameters:
+        search: Optional search term to filter by filename
+        sort_by: Field to sort by (upload_date, filename, file_size) - default: upload_date
+        order: Sort order (asc, desc) - default: desc
+    
+    Response:
+        {
+            "files": [
+                {
+                    "id": 1,
+                    "filename": "document.pdf",
+                    "original_filename": "document.pdf",
+                    "file_size": 12345,
+                    "file_type": ".pdf",
+                    "upload_date": "2024-01-01T12:00:00",
+                    "chunk_count": 10
+                },
+                ...
+            ],
+            "total": 5
+        }
+    """
+    try:
+        # Get query parameters
+        search_term = request.args.get('search', '').strip()
+        sort_by = request.args.get('sort_by', 'upload_date')
+        order = request.args.get('order', 'desc')
+        
+        # Build query
+        query = UploadedFile.query
+        
+        # Apply search filter if provided
+        if search_term:
+            query = query.filter(
+                UploadedFile.filename.ilike(f'%{search_term}%')
+            )
+        
+        # Apply sorting
+        sort_field = getattr(UploadedFile, sort_by, UploadedFile.upload_date)
+        if order == 'desc':
+            query = query.order_by(sort_field.desc())
+        else:
+            query = query.order_by(sort_field.asc())
+        
+        # Execute query
+        files = query.all()
+        
+        # Convert to dict
+        files_data = [f.to_dict() for f in files]
+        
+        return jsonify({
+            'files': files_data,
+            'total': len(files_data)
+        })
+        
+    except Exception as e:
+        return jsonify({'error': f'Failed to retrieve files: {str(e)}'}), 500
+
+
+@app.route('/api/files/<int:file_id>', methods=['DELETE'])
+@app.route('/files/<int:file_id>', methods=['DELETE'])
+@require_auth
+def delete_file(file_id):
+    """
+    Delete uploaded file and all its chunks from Pinecone.
+    
+    Flow:
+    1. Find file in database
+    2. Delete all chunks from Pinecone using stored chunk IDs
+    3. Delete database record
+    
+    Path parameters:
+        file_id: ID of file to delete
+    
+    Response:
+        {
+            "message": "File deleted successfully",
+            "filename": "document.pdf",
+            "chunks_deleted": 10
+        }
+    """
+    try:
+        # Find file in database
+        uploaded_file = UploadedFile.query.get(file_id)
+        
+        if not uploaded_file:
+            return jsonify({'error': 'File not found'}), 404
+        
+        # Delete chunks from Pinecone
+        chunks_deleted = 0
+        if uploaded_file.chunk_ids:
+            try:
+                delete_chunks(uploaded_file.chunk_ids)
+                chunks_deleted = len(uploaded_file.chunk_ids)
+            except Exception as e:
+                print(f"Error deleting chunks from Pinecone: {str(e)}")
+                # Continue with database deletion even if Pinecone deletion fails
+        
+        # Store filename for response
+        filename = uploaded_file.filename
+        
+        # Delete from database
+        db.session.delete(uploaded_file)
+        db.session.commit()
+        
+        return jsonify({
+            'message': 'File deleted successfully',
+            'filename': filename,
+            'chunks_deleted': chunks_deleted
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'error': f'Failed to delete file: {str(e)}'}), 500
 
 
 # ============================================================================

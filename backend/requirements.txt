@@ -2,6 +2,8 @@ python-dotenv
 flask
 flask-cors
 flask-limiter
+flask-sqlalchemy
+psycopg2-binary
 openai
 pinecone
 PyPDF2
