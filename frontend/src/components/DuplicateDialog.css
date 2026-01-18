@@ -1,0 +1,146 @@
+.duplicate-dialog-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.7);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: 20px;
+}
+
+.duplicate-dialog {
+  background: white;
+  border-radius: 12px;
+  padding: 30px;
+  max-width: 600px;
+  width: 100%;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.duplicate-dialog h2 {
+  margin: 0 0 20px 0;
+  color: #d9534f;
+  font-size: 24px;
+}
+
+.duplicate-info {
+  margin-bottom: 25px;
+}
+
+.duplicate-info p {
+  margin: 0 0 15px 0;
+  color: #333;
+}
+
+.existing-file-details {
+  background: #f8f9fa;
+  border-left: 4px solid #d9534f;
+  padding: 15px;
+  border-radius: 4px;
+  margin-top: 10px;
+}
+
+.existing-file-details p {
+  margin: 8px 0;
+  font-size: 14px;
+  color: #555;
+}
+
+.existing-file-details strong {
+  color: #333;
+}
+
+.action-selection {
+  margin-bottom: 25px;
+}
+
+.action-selection > p {
+  margin: 0 0 15px 0;
+  font-weight: 600;
+  color: #333;
+}
+
+.action-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 15px;
+  border: 2px solid #ddd;
+  border-radius: 8px;
+  margin-bottom: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.action-option:hover {
+  background: #f8f9fa;
+  border-color: #4285f4;
+}
+
+.action-option input[type="radio"] {
+  margin-top: 3px;
+  cursor: pointer;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+.action-label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  flex: 1;
+}
+
+.action-title {
+  font-weight: 600;
+  color: #333;
+  font-size: 16px;
+}
+
+.action-description {
+  font-size: 13px;
+  color: #666;
+  line-height: 1.4;
+}
+
+.dialog-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+  margin-top: 25px;
+}
+
+.dialog-actions button {
+  padding: 10px 24px;
+  border: none;
+  border-radius: 6px;
+  font-size: 15px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-cancel {
+  background: #6c757d;
+  color: white;
+}
+
+.btn-cancel:hover {
+  background: #5a6268;
+}
+
+.btn-confirm {
+  background: #4285f4;
+  color: white;
+}
+
+.btn-confirm:hover {
+  background: #357ae8;
+}

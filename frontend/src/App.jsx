@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect } from 'react'
 import ChatWindow from './components/ChatWindow'
 import VoiceButton from './components/VoiceButton'
-import FileUpload from './components/FileUpload'
+import FilesManager from './components/FilesManager'
 import Login from './components/Login'
 import './App.css'
 
@@ -11,6 +11,7 @@ function App() {
   const [username, setUsername] = useState(null)
   const [messages, setMessages] = useState([])
   const [isLoading, setIsLoading] = useState(false)
+  const [activeTab, setActiveTab] = useState('chat') // 'chat' or 'files'
 
   // Check authentication status on mount
   useEffect(() => {
@@ -168,31 +169,48 @@ function App() {
   return (
     <div className="app">
       <div className="app-container">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
-          <h1 className="app-title">Hologram Chat</h1>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-            {username && <span style={{ color: '#666', fontSize: '14px' }}>Logged in as {username}</span>}
-            <button 
-              onClick={handleLogout}
-              style={{
-                padding: '8px 16px',
-                background: '#f44336',
-                color: 'white',
-                border: 'none',
-                borderRadius: '6px',
-                cursor: 'pointer',
-                fontSize: '14px'
-              }}
-            >
+        {/* Header with tabs and logout */}
+        <div className="app-header">
+          <div className="header-left">
+            <h1 className="app-title">Hologram Chat</h1>
+            <div className="tabs">
+              <button 
+                className={`tab ${activeTab === 'chat' ? 'active' : ''}`}
+                onClick={() => setActiveTab('chat')}
+              >
+                💬 Chat
+              </button>
+              <button 
+                className={`tab ${activeTab === 'files' ? 'active' : ''}`}
+                onClick={() => setActiveTab('files')}
+              >
+                📁 Files
+              </button>
+            </div>
+          </div>
+          <div className="header-right">
+            {username && <span className="username-display">Logged in as {username}</span>}
+            <button onClick={handleLogout} className="logout-btn">
               Logout
             </button>
           </div>
         </div>
-        <ChatWindow messages={messages} isLoading={isLoading} />
-        <FileUpload onUploadSuccess={(data) => {
-          addMessage(`Document "${data.message.split(' ')[2]}" uploaded successfully!`, 'system')
-        }} />
-        <VoiceButton onTranscription={handleTranscription} disabled={isLoading} />
+
+        {/* Tab Content */}
+        {activeTab === 'chat' && (
+          <div className="chat-tab">
+            <ChatWindow messages={messages} isLoading={isLoading} />
+            <VoiceButton onTranscription={handleTranscription} disabled={isLoading} />
+          </div>
+        )}
+
+        {activeTab === 'files' && (
+          <div className="files-tab">
+            <FilesManager onUploadSuccess={(data) => {
+              addMessage(`Document "${data.message.split(' ')[2]}" uploaded successfully!`, 'system')
+            }} />
+          </div>
+        )}
       </div>
     </div>
   )
