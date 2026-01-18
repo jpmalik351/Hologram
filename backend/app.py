@@ -708,12 +708,35 @@ def _process_and_store_file(file_data: bytes, filename: str, file_hash: str, fil
         tmp_path = tmp_file.name
     
     try:
-        # Create a file-like object for process_uploaded_file
-        from io import BytesIO
-        file_obj = BytesIO(file_data)
+        # Extract text from the temp file
+        from document_processor import extract_text_from_pdf, extract_text_from_txt, chunk_text
         
-        # Process file into chunks
-        chunks = process_uploaded_file(file_obj, filename)
+        if file_ext == '.pdf':
+            text = extract_text_from_pdf(tmp_path)
+        elif file_ext in ['.txt', '.text']:
+            text = extract_text_from_txt(tmp_path)
+        else:
+            return jsonify({'error': f'Unsupported file type: {file_ext}'}), 400
+        
+        if not text.strip():
+            return jsonify({'error': 'File appears to be empty or text extraction failed'}), 400
+        
+        # Chunk the text
+        text_chunks = chunk_text(text, chunk_size=1000, overlap=200)
+        
+        # Prepare chunks with metadata
+        chunks = []
+        for i, chunk in enumerate(text_chunks):
+            chunks.append({
+                "content": chunk,
+                "metadata": {
+                    "filename": filename,
+                    "chunk_index": i,
+                    "total_chunks": len(text_chunks),
+                    "type": "document_chunk",
+                    "file_type": file_ext
+                }
+            })
         
         if not chunks:
             return jsonify({'error': 'Failed to extract text from file'}), 400
