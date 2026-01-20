@@ -1,0 +1,60 @@
+<!--main ui-->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Article to File Converter</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='styles.css') }}">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Article to File Converter</h1>
+            <p>Convert online articles to downloadable files</p>
+        </header>
+
+        <main>
+            <form action="/convert" method="POST">
+                <div class="form-group">
+                    <label for="urls">Article URLs (one per line):</label>
+                    <textarea 
+                        id="urls" 
+                        name="urls" 
+                        rows="8" 
+                        placeholder="https://example.com/article-1&#10;https://example.com/article-2"
+                        required
+                    ></textarea>
+                    <small>Enter one or multiple URLs, each on a new line</small>
+                </div>
+
+                <div class="form-group">
+                    <label for="format">Output Format:</label>
+                    <select id="format" name="format" required>
+                        <option value="txt">Plain Text (.txt)</option>
+                        <option value="pdf">PDF (.pdf)</option>
+                    </select>
+                </div>
+
+                <button type="submit" class="btn-submit">Convert & Download</button>
+            </form>
+
+            {% if error %}
+            <div class="message error">
+                <strong>Error:</strong> {{ error }}
+            </div>
+            {% endif %}
+
+            {% if success %}
+            <div class="message success">
+                <strong>Success:</strong> {{ success }}
+            </div>
+            {% endif %}
+        </main>
+
+        <footer>
+            <p>Simple, stateless article conversion</p>
+        </footer>
+    </div>
+</body>
+</html>
