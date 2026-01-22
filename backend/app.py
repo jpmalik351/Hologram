@@ -49,11 +49,14 @@ init_db(app)
 # ============================================================================
 
 # Initialize rate limiter (uses IP address to identify users)
+# In-memory rate limiting - Flask-limiter automatically cleans up old entries periodically
+storage_uri = "memory://"
+
 limiter = Limiter(
     app=app,
     key_func=get_remote_address,
     default_limits=["500 per day", "100 per hour"],  # Global limits per IP - generous for normal use
-    storage_uri="memory://"  # In-memory storage (resets on restart)
+    storage_uri=storage_uri
 )
 
 # Request size limits (prevent large payloads that could be expensive)
@@ -62,23 +65,65 @@ MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 MAX_AUDIO_DURATION = 60  # seconds (Whisper costs $0.006/minute)
 
 # ============================================================================
-# CONVERSATION STATE (In-Memory, Per Session)
+# CONVERSATION STATE (Per Session - Dictionary indexed by session ID)
 # ============================================================================
 
-# Store conversation history as list of message dicts
-# Format: [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}, ...]
-# This is NOT persisted - each session starts fresh
-conversation_history = []
-
-# Current character being spoken to (set dynamically based on user request)
-# Format: {"name": "Character Name", "set_by_user": True/False}
-current_character = None
+# CRITICAL FIX: Store conversation history PER SESSION, not globally
+# This prevents memory leaks from accumulating conversations across all users
+# Format: {session_id: {"history": [...], "character": {...}, "last_activity": timestamp}}
+conversation_sessions = {}
 
 # Context configuration
 # For character chatbots, 6-10 messages (3-5 exchanges) is usually enough
 # System prompt maintains character consistency, recent context just helps conversation flow
 MAX_CONTEXT_MESSAGES = 10  # Last 10 messages (5 exchanges) - optimal for character chatbots
 # Too much context can actually dilute character consistency
+
+# Session timeout - clean up inactive sessions to prevent memory leaks
+SESSION_TIMEOUT_MINUTES = 5  # Clear sessions inactive for 5 minutes
+
+import time
+from datetime import datetime, timedelta
+
+def get_session_id():
+    """Get or create session ID for current user."""
+    if 'session_id' not in session:
+        session['session_id'] = str(uuid.uuid4())
+    return session['session_id']
+
+def get_session_data():
+    """Get conversation data for current session, creating if needed."""
+    session_id = get_session_id()
+    
+    if session_id not in conversation_sessions:
+        conversation_sessions[session_id] = {
+            "history": [],
+            "character": None,
+            "last_activity": time.time()
+        }
+    
+    # Update last activity timestamp
+    conversation_sessions[session_id]["last_activity"] = time.time()
+    
+    return conversation_sessions[session_id]
+
+def cleanup_old_sessions():
+    """
+    Clean up inactive sessions to prevent memory leaks.
+    Called periodically to remove sessions that haven't been active recently.
+    """
+    current_time = time.time()
+    timeout_seconds = SESSION_TIMEOUT_MINUTES * 60
+    
+    sessions_to_remove = []
+    for session_id, data in conversation_sessions.items():
+        if current_time - data["last_activity"] > timeout_seconds:
+            sessions_to_remove.append(session_id)
+    
+    for session_id in sessions_to_remove:
+        del conversation_sessions[session_id]
+    
+    return len(sessions_to_remove)
 
 # ============================================================================
 # CHARACTER CONFIGURATION
@@ -125,6 +170,39 @@ def detect_character_request(message: str) -> str | None:
                 return character
     
     return None
+
+
+def detect_goodbye(message: str) -> bool:
+    """
+    Detect if user is saying goodbye/ending the conversation.
+    
+    Looks for patterns like:
+    - "goodbye", "bye", "see you", "farewell", "talk later"
+    
+    Returns:
+        bool: True if goodbye detected, False otherwise
+    """
+    import re
+    
+    message_lower = message.lower().strip()
+    
+    # Goodbye patterns
+    goodbye_patterns = [
+        r'\bgoodbye\b',
+        r'\bbye\b',
+        r'\bsee\s+you\b',
+        r'\bfarewell\b',
+        r'\btalk\s+later\b',
+        r'\bsee\s+ya\b',
+        r'\blater\b',
+        r'\bgood\s+bye\b',
+    ]
+    
+    for pattern in goodbye_patterns:
+        if re.search(pattern, message_lower):
+            return True
+    
+    return False
 
 
 def build_character_system_prompt(character_name: str, knowledge: str = None) -> str:
@@ -323,7 +401,7 @@ def chat():
     2. If RAG enabled: Retrieves relevant knowledge from Pinecone
     3. Builds message history (system prompt + conversation history + user message)
     4. Calls OpenAI GPT to generate character response
-    5. Updates in-memory conversation history
+    5. Updates session-specific conversation history
     6. Returns response
     
     Request body:
@@ -336,7 +414,15 @@ def chat():
             "response": "character's response text"
         }
     """
-    global conversation_history, current_character
+    # MEMORY FIX: Use session-specific data instead of global variables
+    session_data = get_session_data()
+    conversation_history = session_data["history"]
+    current_character = session_data["character"]
+    
+    # Periodically clean up old sessions (every 30th request)
+    import random
+    if random.randint(1, 30) == 1:
+        cleanup_old_sessions()
 
     data = request.json
     user_message = data.get("message", "")
@@ -354,12 +440,23 @@ def chat():
         return jsonify({'error': 'Message cannot be empty'}), 400
     
     try:
+        # Check if user is saying goodbye - clear session and end conversation
+        if detect_goodbye(user_message):
+            session_id = get_session_id()
+            if session_id in conversation_sessions:
+                del conversation_sessions[session_id]
+            return jsonify({
+                'response': 'Goodbye! It was nice talking with you. Feel free to come back anytime!'
+            })
+        
         # Check if user wants to speak to a specific character
         detected_character = detect_character_request(user_message)
         
         if detected_character:
             # User requested a character - set it as current character
             current_character = {"name": detected_character, "set_by_user": True}
+            session_data["character"] = current_character
+            
             # Retrieve knowledge about this character from vector DB
             knowledge = ""
             if USE_RAG:
@@ -434,12 +531,12 @@ def chat():
         # Note: user_message param is empty because messages already contains everything
         reply = call_llm("", messages)
         
-        # Update conversation history (in-memory only, not stored)
+        # Update conversation history (session-specific, not global)
         conversation_history.append({"role": "user", "content": user_message})
         conversation_history.append({"role": "assistant", "content": reply})
         
         # Keep only last N messages for context (to manage memory and token usage)
-        conversation_history = conversation_history[-MAX_CONTEXT_MESSAGES:]
+        session_data["history"] = conversation_history[-MAX_CONTEXT_MESSAGES:]
         
         return jsonify({'response': reply})
         
@@ -454,7 +551,7 @@ def reset():
     """
     Reset conversation history and current character, starting a new conversation session.
     
-    This clears the in-memory conversation history and character selection. 
+    This clears the session-specific conversation history and character selection. 
     Note: This does NOT affect the Pinecone knowledge base (uploaded documents remain available).
     
     Response:
@@ -462,9 +559,10 @@ def reset():
             "message": "Conversation reset"
         }
     """
-    global conversation_history, current_character
-    conversation_history = []
-    current_character = None
+    # MEMORY FIX: Clear session-specific data instead of global variables
+    session_data = get_session_data()
+    session_data["history"] = []
+    session_data["character"] = None
     return jsonify({'message': 'Conversation reset'})
 
 

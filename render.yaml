@@ -5,17 +5,20 @@ services:
     env: docker
     plan: free
     region: oregon
-    
+  
   # Web service
   - type: web
     name: hologram-chatbot
     env: python
+    # Free tier: 512MB RAM
+    plan: free
     # Build: First build frontend (requires Node.js), then install Python deps
     # Render's Python environment includes Node.js, so this should work
     buildCommand: |
       chmod +x build.sh && ./build.sh
     # Start: Use gunicorn to serve Flask app (which serves frontend static files)
-    startCommand: cd backend && gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120
+    # MEMORY FIX: Reduced workers from 2 to 1, added memory-efficient settings
+    startCommand: cd backend && gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 2 --worker-class gthread --timeout 120 --max-requests 1000 --max-requests-jitter 50
     envVars:
       - key: OPENAI_API_KEY
         sync: false
