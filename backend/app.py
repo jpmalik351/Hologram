@@ -1029,12 +1029,20 @@ def list_files():
         # Convert to dict
         files_data = [f.to_dict() for f in files]
         
+        # Log for debugging
+        print(f"[FILES API] Retrieved {len(files_data)} files from database")
+        if files_data:
+            print(f"[FILES API] Sample file: {files_data[0].get('filename', 'N/A')}")
+        
         return jsonify({
             'files': files_data,
             'total': len(files_data)
         })
         
     except Exception as e:
+        import traceback
+        print(f"[FILES API] Error retrieving files: {str(e)}")
+        print(f"[FILES API] Traceback: {traceback.format_exc()}")
         return jsonify({'error': f'Failed to retrieve files: {str(e)}'}), 500
 
 

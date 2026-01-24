@@ -10,11 +10,20 @@ function FilesManager({ onUploadSuccess }) {
   const [sortOrder, setSortOrder] = useState('desc')
   const [deleteConfirm, setDeleteConfirm] = useState(null) // Store file ID to delete
 
+  // Fetch files when filters change
   useEffect(() => {
     fetchFiles()
   }, [searchTerm, sortBy, sortOrder])
 
+  // Also ensure we fetch on initial mount (in case component mounts before filters are set)
+  useEffect(() => {
+    console.log('FilesManager: Component mounted, fetching files on initial load')
+    fetchFiles()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []) // Empty deps = run only on mount
+
   const fetchFiles = async () => {
+    setLoading(true)
     try {
       const params = new URLSearchParams({
         search: searchTerm,
@@ -22,18 +31,29 @@ function FilesManager({ onUploadSuccess }) {
         order: sortOrder
       })
 
+      console.log('FilesManager: Fetching files from /api/files')
       const response = await fetch(`/api/files?${params}`, {
         credentials: 'include'
       })
 
+      console.log('FilesManager: Response status:', response.status)
+
       if (response.ok) {
         const data = await response.json()
+        console.log('FilesManager: Received data:', data)
+        console.log('FilesManager: Files count:', data.files?.length || 0)
         setFiles(data.files || [])
       } else {
-        console.error('Failed to fetch files')
+        const errorData = await response.json().catch(() => ({}))
+        console.error('FilesManager: Failed to fetch files:', response.status, errorData)
+        if (response.status === 401) {
+          console.error('FilesManager: Authentication required')
+        }
+        setFiles([])
       }
     } catch (error) {
-      console.error('Error fetching files:', error)
+      console.error('FilesManager: Error fetching files:', error)
+      setFiles([])
     } finally {
       setLoading(false)
     }
