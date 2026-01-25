@@ -1007,14 +1007,27 @@ def list_files():
         sort_by = request.args.get('sort_by', 'upload_date')
         order = request.args.get('order', 'desc')
         
+        # Debug: Check database connection
+        from database import db
+        database_uri = db.engine.url if hasattr(db, 'engine') else 'unknown'
+        print(f"[FILES API] Database URI: {str(database_uri)[:50]}...")  # Don't log full credentials
+        
         # Build query
         query = UploadedFile.query
+        
+        # Debug: Check if table exists and count before filtering
+        try:
+            total_count = UploadedFile.query.count()
+            print(f"[FILES API] Total files in database (before filters): {total_count}")
+        except Exception as count_error:
+            print(f"[FILES API] Error counting files: {str(count_error)}")
         
         # Apply search filter if provided
         if search_term:
             query = query.filter(
                 UploadedFile.filename.ilike(f'%{search_term}%')
             )
+            print(f"[FILES API] Applied search filter: '{search_term}'")
         
         # Apply sorting
         sort_field = getattr(UploadedFile, sort_by, UploadedFile.upload_date)
@@ -1023,8 +1036,11 @@ def list_files():
         else:
             query = query.order_by(sort_field.asc())
         
+        print(f"[FILES API] Executing query with sort_by={sort_by}, order={order}")
+        
         # Execute query
         files = query.all()
+        print(f"[FILES API] Query returned {len(files)} file objects")
         
         # Convert to dict
         files_data = [f.to_dict() for f in files]
@@ -1033,6 +1049,8 @@ def list_files():
         print(f"[FILES API] Retrieved {len(files_data)} files from database")
         if files_data:
             print(f"[FILES API] Sample file: {files_data[0].get('filename', 'N/A')}")
+        else:
+            print(f"[FILES API] WARNING: No files found! Check database connection and table contents.")
         
         return jsonify({
             'files': files_data,
