@@ -19,7 +19,6 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from functools import wraps
 from openai_service import call_llm, transcribe_audio, text_to_speech
-from document_processor import process_uploaded_file
 from pinecone_service import get_or_create_index, get_embedding, delete_chunks
 from database import db, init_db, UploadedFile
 from file_utils import calculate_file_hash, get_next_version_filename, sanitize_filename
@@ -27,6 +26,7 @@ import os
 import tempfile
 import io
 import uuid
+import logging
 
 # ============================================================================
 # FLASK APP INITIALIZATION
@@ -34,6 +34,10 @@ import uuid
 
 app = Flask(__name__, static_folder='../frontend/dist', static_url_path='')
 CORS(app)  # Enable CORS for React frontend
+logging.basicConfig(
+    level=logging.INFO,
+    format='[%(asctime)s] %(levelname)s in %(module)s: %(message)s'
+)
 
 # Session configuration for authentication
 app.secret_key = os.environ.get('FLASK_SECRET_KEY', os.urandom(32))  # Use env var or generate random key
@@ -90,6 +94,21 @@ def get_session_id():
     if 'session_id' not in session:
         session['session_id'] = str(uuid.uuid4())
     return session['session_id']
+
+
+def log_request_context(event: str, **kwargs):
+    """
+    Structured request logging helper for easier production debugging.
+    """
+    session_id = session.get('session_id', 'no-session')
+    username = session.get('username', 'anonymous')
+    app.logger.info(
+        "[%s] session=%s user=%s details=%s",
+        event,
+        session_id,
+        username,
+        kwargs
+    )
 
 def get_session_data():
     """Get conversation data for current session, creating if needed."""
@@ -328,23 +347,27 @@ def login():
     password = data.get('password', '')
     
     if not username or not password:
+        app.logger.warning("[LOGIN] Missing username or password")
         return jsonify({'error': 'Username and password required'}), 400
     
     credentials = load_credentials()
     
     # Check if credentials are configured
     if not credentials:
+        app.logger.error("[LOGIN] AUTH_CREDENTIALS not configured")
         return jsonify({'error': 'Authentication not configured'}), 500
     
     # Verify credentials
     if username in credentials and credentials[username] == password:
         session['authenticated'] = True
         session['username'] = username
+        log_request_context("LOGIN_SUCCESS")
         return jsonify({
             'success': True,
             'message': 'Logged in successfully'
         })
     else:
+        app.logger.warning("[LOGIN] Invalid credentials for user=%s", username)
         return jsonify({'error': 'Invalid username or password'}), 401
 
 
@@ -359,6 +382,7 @@ def logout():
             "message": "Logged out successfully"
         }
     """
+    log_request_context("LOGOUT")
     session.clear()
     return jsonify({
         'success': True,
@@ -422,10 +446,13 @@ def chat():
     # Periodically clean up old sessions (every 30th request)
     import random
     if random.randint(1, 30) == 1:
-        cleanup_old_sessions()
+        removed_count = cleanup_old_sessions()
+        if removed_count:
+            app.logger.info("[SESSION_CLEANUP] Removed %s inactive sessions", removed_count)
 
     data = request.json
     user_message = data.get("message", "")
+    log_request_context("CHAT_REQUEST", message_length=len(user_message or ""))
     if not user_message:
         return jsonify({'error': 'Message is required'}), 400
     
@@ -445,6 +472,7 @@ def chat():
             session_id = get_session_id()
             if session_id in conversation_sessions:
                 del conversation_sessions[session_id]
+            log_request_context("CHAT_GOODBYE")
             return jsonify({
                 'response': 'Goodbye! It was nice talking with you. Feel free to come back anytime!'
             })
@@ -466,7 +494,13 @@ def chat():
                     # Include character name in query to find character-specific knowledge
                     character_query = f"{detected_character} {user_message}"
                     knowledge = retrieve_character_knowledge(character_query, top_k=5)
+                    log_request_context(
+                        "CHARACTER_SELECTED",
+                        character=detected_character,
+                        rag_knowledge_found=bool(knowledge)
+                    )
                 except ImportError:
+                    app.logger.warning("[CHAT] rag_service import failed during character selection")
                     pass
             
             # Build system prompt for this character
@@ -504,7 +538,13 @@ def chat():
                 # Include character name in query to find character-specific knowledge
                 character_query = f"{character_name} {user_message}"
                 knowledge = retrieve_character_knowledge(character_query, top_k=5)
+                log_request_context(
+                    "CHAT_RAG_RETRIEVAL",
+                    character=character_name,
+                    rag_knowledge_found=bool(knowledge)
+                )
             except ImportError:
+                app.logger.warning("[CHAT] rag_service import failed during conversation")
                 pass
         
         # Build system prompt with character and RAG knowledge
@@ -530,6 +570,7 @@ def chat():
         # Call OpenAI - pass the full messages list
         # Note: user_message param is empty because messages already contains everything
         reply = call_llm("", messages)
+        log_request_context("CHAT_RESPONSE", response_length=len(reply or ""))
         
         # Update conversation history (session-specific, not global)
         conversation_history.append({"role": "user", "content": user_message})
@@ -541,6 +582,7 @@ def chat():
         return jsonify({'response': reply})
         
     except Exception as e:
+        app.logger.exception("[CHAT] Unexpected error")
         return jsonify({'error': str(e)}), 500
 
 
@@ -608,10 +650,12 @@ def transcribe():
     with tempfile.NamedTemporaryFile(delete=False, suffix='.webm') as tmp_file:
         audio_file.save(tmp_file.name)
         tmp_path = tmp_file.name
+    log_request_context("TRANSCRIBE_REQUEST", file_size=file_size)
     
     try:
         # Use OpenAI Whisper for transcription
         transcript_text = transcribe_audio(tmp_path)
+        log_request_context("TRANSCRIBE_SUCCESS", text_length=len(transcript_text or ""))
         
         # Clean up temp file
         os.unlink(tmp_path)
@@ -622,6 +666,7 @@ def transcribe():
         # Clean up temp file on error
         if os.path.exists(tmp_path):
             os.unlink(tmp_path)
+        app.logger.exception("[TRANSCRIBE] Failed to transcribe audio")
         return jsonify({'error': str(e)}), 500
 
 
@@ -684,6 +729,7 @@ def upload_document():
         return jsonify({'error': 'Unsupported file type. Please upload PDF or TXT files.'}), 400
     
     try:
+        log_request_context("UPLOAD_REQUEST", filename=filename, file_size=file_size)
         # Calculate file hash for duplicate detection
         file_hash = calculate_file_hash(file_data)
         
@@ -691,6 +737,7 @@ def upload_document():
         existing_file = UploadedFile.query.filter_by(file_hash=file_hash).first()
         
         if existing_file:
+            log_request_context("UPLOAD_DUPLICATE_DETECTED", filename=filename, existing_file_id=existing_file.id)
             # Duplicate found - return info and ask user what to do
             return jsonify({
                 'duplicate': True,
@@ -704,6 +751,7 @@ def upload_document():
         return _process_and_store_file(file_data, filename, file_hash, file_size, file_ext)
         
     except Exception as e:
+        app.logger.exception("[UPLOAD] Failed while checking or processing upload")
         return jsonify({'error': f'Failed to process file: {str(e)}'}), 500
 
 
@@ -750,6 +798,7 @@ def upload_document_confirm():
     file_ext = os.path.splitext(filename)[1].lower()
     
     try:
+        log_request_context("UPLOAD_CONFIRM_REQUEST", action=action, filename=filename, file_size=file_size)
         # Calculate file hash
         file_hash = calculate_file_hash(file_data)
         
@@ -767,6 +816,7 @@ def upload_document_confirm():
                 db.session.commit()
             
             # Process and store new file with same name
+            log_request_context("UPLOAD_CONFIRM_OVERWRITE", filename=filename)
             return _process_and_store_file(file_data, filename, file_hash, file_size, file_ext)
         
         else:  # keep_both
@@ -778,10 +828,12 @@ def upload_document_confirm():
             versioned_filename = get_next_version_filename(filename, all_filenames)
             
             # Process and store with versioned name
+            log_request_context("UPLOAD_CONFIRM_KEEP_BOTH", original_filename=filename, versioned_filename=versioned_filename)
             return _process_and_store_file(file_data, versioned_filename, file_hash, file_size, file_ext, original_filename=filename)
         
     except Exception as e:
         db.session.rollback()
+        app.logger.exception("[UPLOAD_CONFIRM] Failed during duplicate resolution")
         return jsonify({'error': f'Failed to process file: {str(e)}'}), 500
 
 
@@ -821,6 +873,7 @@ def _process_and_store_file(file_data: bytes, filename: str, file_hash: str, fil
         
         # Chunk the text
         text_chunks = chunk_text(text, chunk_size=1000, overlap=200)
+        app.logger.info("[UPLOAD_PROCESS] filename=%s generated_chunks=%s", filename, len(text_chunks))
         
         # Prepare chunks with metadata
         chunks = []
@@ -842,6 +895,7 @@ def _process_and_store_file(file_data: bytes, filename: str, file_hash: str, fil
         # Get Pinecone index
         index = get_or_create_index()
         if index is None:
+            app.logger.error("[UPLOAD_PROCESS] Pinecone index unavailable for filename=%s", filename)
             return jsonify({'error': 'Pinecone is not configured'}), 500
         
         # Store each chunk in Pinecone and track chunk IDs
@@ -881,7 +935,7 @@ def _process_and_store_file(file_data: bytes, filename: str, file_hash: str, fil
                 
             except Exception as e:
                 error_msg = f"Chunk {chunk_data['metadata']['chunk_index']}: {str(e)}"
-                print(f"Error storing {error_msg}")
+                app.logger.error("[UPLOAD_PROCESS] Error storing %s", error_msg)
                 errors.append(error_msg)
                 continue
         
@@ -903,6 +957,12 @@ def _process_and_store_file(file_data: bytes, filename: str, file_hash: str, fil
         )
         db.session.add(uploaded_file)
         db.session.commit()
+        app.logger.info(
+            "[UPLOAD_PROCESS] Stored file_id=%s filename=%s stored_chunks=%s",
+            uploaded_file.id,
+            filename,
+            stored_count
+        )
         
         response = {
             'message': f'Successfully uploaded {filename}',
@@ -957,6 +1017,7 @@ def tts():
         }), 400
     
     try:
+        log_request_context("TTS_REQUEST", text_length=len(text), voice=voice)
         # Generate speech audio bytes
         audio_bytes = text_to_speech(text, voice=voice)
         
@@ -969,6 +1030,7 @@ def tts():
         )
         
     except Exception as e:
+        app.logger.exception("[TTS] Failed to generate audio")
         return jsonify({'error': str(e)}), 500
 
 
@@ -1030,9 +1092,13 @@ def list_files():
         files_data = [f.to_dict() for f in files]
         
         # Log for debugging
-        print(f"[FILES API] Retrieved {len(files_data)} files from database")
-        if files_data:
-            print(f"[FILES API] Sample file: {files_data[0].get('filename', 'N/A')}")
+        app.logger.info(
+            "[FILES_API] Retrieved files=%s search=%s sort_by=%s order=%s",
+            len(files_data),
+            search_term,
+            sort_by,
+            order
+        )
         
         return jsonify({
             'files': files_data,
@@ -1041,8 +1107,8 @@ def list_files():
         
     except Exception as e:
         import traceback
-        print(f"[FILES API] Error retrieving files: {str(e)}")
-        print(f"[FILES API] Traceback: {traceback.format_exc()}")
+        app.logger.error("[FILES_API] Error retrieving files: %s", str(e))
+        app.logger.error("[FILES_API] Traceback: %s", traceback.format_exc())
         return jsonify({'error': f'Failed to retrieve files: {str(e)}'}), 500
 
 
@@ -1082,7 +1148,7 @@ def delete_file(file_id):
                 delete_chunks(uploaded_file.chunk_ids)
                 chunks_deleted = len(uploaded_file.chunk_ids)
             except Exception as e:
-                print(f"Error deleting chunks from Pinecone: {str(e)}")
+                app.logger.warning("[FILES_DELETE] Pinecone chunk deletion failed for file_id=%s: %s", file_id, str(e))
                 # Continue with database deletion even if Pinecone deletion fails
         
         # Store filename for response
@@ -1091,6 +1157,7 @@ def delete_file(file_id):
         # Delete from database
         db.session.delete(uploaded_file)
         db.session.commit()
+        app.logger.info("[FILES_DELETE] Deleted file_id=%s filename=%s chunks_deleted=%s", file_id, filename, chunks_deleted)
         
         return jsonify({
             'message': 'File deleted successfully',
@@ -1100,6 +1167,7 @@ def delete_file(file_id):
         
     except Exception as e:
         db.session.rollback()
+        app.logger.exception("[FILES_DELETE] Failed to delete file_id=%s", file_id)
         return jsonify({'error': f'Failed to delete file: {str(e)}'}), 500
 
 

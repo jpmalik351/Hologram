@@ -90,9 +90,10 @@ def transcribe_audio(audio_file_path: str) -> str:
         - Returns plain text (not JSON)
     """
     try:
+        stt_model = os.getenv("STT_MODEL", "whisper-1")
         with open(audio_file_path, 'rb') as audio_file:
             transcript = client.audio.transcriptions.create(
-                model="whisper-1",
+                model=stt_model,
                 file=audio_file,
                 response_format="text"  # Returns plain text, not JSON
             )
@@ -126,9 +127,11 @@ def text_to_speech(text: str, voice: str = "onyx") -> bytes:
         - Returns MP3 audio bytes
     """
     try:
+        tts_model = os.getenv("TTS_MODEL", "tts-1")
+        resolved_voice = voice or os.getenv("TTS_VOICE", "onyx")
         response = client.audio.speech.create(
-            model="tts-1",
-            voice=voice,
+            model=tts_model,
+            voice=resolved_voice,
             input=text
         )
         return response.content
