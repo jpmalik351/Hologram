@@ -1,29 +1,29 @@
-services:
-  # PostgreSQL Database for file tracking
-  - type: pserv
-    name: hologram-db
-    env: docker
+databases:
+  - name: hologram-db
     plan: free
     region: oregon
-  
-  # Web service
+
+services:
   - type: web
     name: hologram-chatbot
-    env: python
-    # Free tier: 512MB RAM
+    runtime: python
     plan: free
-    # Build: First build frontend (requires Node.js), then install Python deps
-    # Render's Python environment includes Node.js, so this should work
-    buildCommand: |
-      chmod +x build.sh && ./build.sh
-    # Start: Use gunicorn to serve Flask app (which serves frontend static files)
-    # MEMORY FIX: Reduced workers from 2 to 1, added memory-efficient settings
-    startCommand: cd backend && gunicorn app:app --bind 0.0.0.0:$PORT --workers 1 --threads 2 --worker-class gthread --timeout 120 --max-requests 1000 --max-requests-jitter 50
+    region: oregon
+    buildCommand: chmod +x build.sh && ./build.sh
+    startCommand: cd backend && gunicorn app:app --bind 0.0.0.0:$PORT 
+--workers 1 --threads 2 --worker-class gthread --timeout 120 
+--max-requests 1000 --max-requests-jitter 50
     envVars:
       - key: OPENAI_API_KEY
         sync: false
       - key: OPENAI_MODEL
         value: gpt-4o-mini
+      - key: STT_MODEL
+        value: whisper-1
+      - key: TTS_MODEL
+        value: tts-1
+      - key: TTS_VOICE
+        value: onyx
       - key: PINECONE_API_KEY
         sync: false
       - key: PINECONE_INDEX_NAME
@@ -37,9 +37,8 @@ services:
       - key: AUTH_CREDENTIALS
         sync: false
       - key: FLASK_SECRET_KEY
-        sync: false
+        generateValue: true
       - key: DATABASE_URL
         fromDatabase:
           name: hologram-db
           property: connectionString
-
