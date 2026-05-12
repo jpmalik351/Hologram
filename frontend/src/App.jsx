@@ -3,6 +3,7 @@ import ChatWindow from './components/ChatWindow'
 import VoiceButton from './components/VoiceButton'
 import FilesManager from './components/FilesManager'
 import Login from './components/Login'
+import AvatarVideo from './components/AvatarVideo'
 import './App.css'
 
 function App() {
@@ -10,6 +11,8 @@ function App() {
   const [isCheckingAuth, setIsCheckingAuth] = useState(true)
   const [username, setUsername] = useState(null)
   const [messages, setMessages] = useState([])
+  const [isSpeaking, setIsSpeaking] = useState(false)
+  const [currentCharacter, setCurrentCharacter] = useState('ved-vyasa')
   const [isLoading, setIsLoading] = useState(false)
   const [activeTab, setActiveTab] = useState('chat') // 'chat' or 'files'
 
@@ -63,29 +66,43 @@ function App() {
     setMessages(prev => [...prev, { text, sender, timestamp: Date.now() }])
   }
 
-  const playTTS = async (text) => {
-    try {
-      const response = await fetch('/api/tts', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        credentials: 'include',
-        body: JSON.stringify({ text, voice: 'onyx' }),
-      })
+const playTTS = async (text) => {
+  try {
+    setIsSpeaking(true)
 
-      if (response.ok) {
-        const audioBlob = await response.blob()
-        const audioUrl = URL.createObjectURL(audioBlob)
-        const audio = new Audio(audioUrl)
-        await audio.play()
-        audio.onended = () => URL.revokeObjectURL(audioUrl)
+    const response = await fetch('/api/tts', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      credentials: 'include',
+      body: JSON.stringify({ text }),
+    })
+
+    if (response.ok) {
+      const audioBlob = await response.blob()
+      const audioUrl = URL.createObjectURL(audioBlob)
+      const audio = new Audio(audioUrl)
+
+      audio.onended = () => {
+        URL.revokeObjectURL(audioUrl)
+        setIsSpeaking(false)
       }
-    } catch (error) {
-      console.error('TTS playback error:', error)
-    }
-  }
 
+      audio.onerror = () => {
+        URL.revokeObjectURL(audioUrl)
+        setIsSpeaking(false)
+      }
+
+      await audio.play()
+    } else {
+      setIsSpeaking(false)
+    }
+  } catch (error) {
+    console.error('TTS playback error:', error)
+    setIsSpeaking(false)
+  }
+}
   const sendMessage = async (messageText) => {
     if (!messageText.trim()) return
 
@@ -199,7 +216,8 @@ function App() {
         {/* Tab Content */}
         {activeTab === 'chat' && (
           <div className="chat-tab">
-            <ChatWindow messages={messages} isLoading={isLoading} />
+            <AvatarVideo character={currentCharacter}isSpeaking={isSpeaking} />
+	    <ChatWindow messages={messages} isLoading={isLoading} />
             <VoiceButton onTranscription={handleTranscription} disabled={isLoading} />
           </div>
         )}
