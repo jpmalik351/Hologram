@@ -1,0 +1,30 @@
+.avatar-video-shell {
+  width: 100%;
+  max-width: 420px;
+  margin: 0 auto 16px auto;
+  border-radius: 18px;
+  overflow: hidden;
+  background: #000;
+  position: relative;
+}
+
+.avatar-video {
+  width: 100%;
+  display: block;
+  opacity: 0.75;
+}
+
+.avatar-video.speaking {
+  opacity: 1;
+}
+
+.avatar-label {
+  position: absolute;
+  bottom: 10px;
+  left: 12px;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.65);
+  color: white;
+  font-size: 13px;
+}
