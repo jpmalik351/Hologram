@@ -216,7 +216,8 @@ const playTTS = async (text) => {
         {/* Tab Content */}
         {activeTab === 'chat' && (
           <div className="chat-tab">
-            <AvatarVideo character={currentCharacter}isSpeaking={isSpeaking} />
+            <AvatarVideo character={currentCharacter} 
+isSpeaking={isSpeaking} />
 	    <ChatWindow messages={messages} isLoading={isLoading} />
             <VoiceButton onTranscription={handleTranscription} disabled={isLoading} />
           </div>
